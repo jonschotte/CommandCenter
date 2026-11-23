@@ -64,10 +64,10 @@ struct MemoryView: View {
     private var breakdown: some View {
         let total = Double(max(system.memTotal, 1))
         let parts: [(String, UInt64, Color)] = [
-            ("App", system.memApp, .blue),
-            ("Wired", system.memWired, .orange),
-            ("Compressed", system.memCompressed, .purple),
-            ("Cached files", system.memCached, .teal),
+            ("App", system.memApp, Theme.accent),
+            ("Wired", system.memWired, Theme.network),
+            ("Compressed", system.memCompressed, Theme.gpu),
+            ("Cached files", system.memCached, Theme.steel),
             ("Free", free, Color.primary.opacity(0.12)),
         ]
         return VStack(alignment: .leading, spacing: 12) {
@@ -117,7 +117,7 @@ struct MemoryView: View {
             GeometryReader { geo in
                 ZStack(alignment: .leading) {
                     Capsule().fill(Color.primary.opacity(0.06))
-                    Capsule().fill(Color.accentColor.opacity(0.7))
+                    Capsule().fill(Theme.accent.opacity(0.7))
                         .frame(width: max(2, geo.size.width * Double(g.total) / Double(maxTotal)))
                 }
             }

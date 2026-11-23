@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 import AppKit
 
 // MARK: - Models & server
@@ -192,6 +193,11 @@ struct ChatView: View {
     @EnvironmentObject var store: SessionStore
     @State private var input = ""
     @State private var showSystem = false
+    @State private var attachments: [Data] = []   // JPEG, ready to send
+    @State private var pasteMonitor: Any?
+    @State private var dropTargeted = false
+    @StateObject private var summarizer = Summarizer()
+    @State private var showSummary = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -214,6 +220,9 @@ struct ChatView: View {
                 }
                 Spacer()
                 Button { models.probeEndpoints() } label: { Image(systemName: "arrow.clockwise") }.help("Re-detect servers")
+                Button { summarize() } label: { Image(systemName: "list.bullet.clipboard") }
+                    .help("Summarize this chat (uses the selected local model, so it stays on this Mac)")
+                    .disabled(models.messages.isEmpty || models.chatEndpoint == nil)
                 Button { showSystem.toggle() } label: { Image(systemName: "text.badge.star") }.help("System prompt")
                 Button { models.clearChat() } label: { Image(systemName: "trash") }.help("Clear chat")
             }
@@ -243,8 +252,31 @@ struct ChatView: View {
                 }
             }
             Divider()
+            if !attachments.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(Array(attachments.enumerated()), id: \.offset) { i, data in
+                            ZStack(alignment: .topTrailing) {
+                                if let img = NSImage(data: data) {
+                                    Image(nsImage: img).resizable().scaledToFill()
+                                        .frame(width: 64, height: 64).clipShape(RoundedRectangle(cornerRadius: 8))
+                                }
+                                Button { attachments.remove(at: i) } label: {
+                                    Image(systemName: "xmark.circle.fill").foregroundStyle(.white, .black.opacity(0.6))
+                                }
+                                .buttonStyle(.plain).padding(3)
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 12).padding(.top, 10)
+                }
+            }
             HStack(alignment: .bottom) {
-                TextField("Message…", text: $input, axis: .vertical)
+                Button { chooseImages() } label: { Image(systemName: "paperclip") }
+                    .buttonStyle(.borderless)
+                    .help("Attach images (you can also paste with ⌘V or drop them here). Needs a vision model.")
+                    .padding(.bottom, 8)
+                TextField(attachments.isEmpty ? "Message…" : "Ask about the image…", text: $input, axis: .vertical)
                     .lineLimit(1...8)
                     .textFieldStyle(.plain)
                     .padding(8)
@@ -254,19 +286,90 @@ struct ChatView: View {
                     Button("Stop") { models.stopGenerating() }
                 } else {
                     Button("Send", action: send).keyboardShortcut(.return, modifiers: .command)
-                        .disabled(models.chatEndpoint == nil || input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .disabled(models.chatEndpoint == nil || (input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && attachments.isEmpty))
                 }
             }
             .padding(12)
         }
+        .overlay {
+            if dropTargeted {
+                RoundedRectangle(cornerRadius: 12).strokeBorder(Theme.accent, style: StrokeStyle(lineWidth: 2, dash: [8, 5]))
+                    .background(Theme.accent.opacity(0.06)).padding(6).allowsHitTesting(false)
+            }
+        }
+        .onDrop(of: [.fileURL, .image], isTargeted: $dropTargeted) { providers in
+            handleDrop(providers); return true
+        }
+        .onAppear(perform: installPasteMonitor)
+        .onDisappear {
+            if let m = pasteMonitor { NSEvent.removeMonitor(m); pasteMonitor = nil }
+        }
+        .sheet(isPresented: $showSummary) { SummarySheet(summarizer: summarizer, regenerate: summarize) }
         .navigationTitle("Chat")
     }
 
     private func send() {
         guard !models.isGenerating else { return }
-        let t = input
+        let t = input, imgs = attachments
+        guard !t.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !imgs.isEmpty else { return }
         input = ""
-        models.send(t)
+        attachments = []
+        models.send(t, images: imgs)
+    }
+
+    private func summarize() {
+        guard let ep = models.chatEndpoint else { return }
+        summarizer.runLocal(base: ep.baseURL, model: models.chatModel, text: models.chatTranscript, source: "Chat")
+        showSummary = true
+    }
+
+    private func attach(_ data: Data) {
+        if let jpeg = ImageAttach.jpegForModel(data) { attachments.append(jpeg) }
+    }
+
+    private func chooseImages() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = true
+        panel.allowedContentTypes = [.image]
+        guard panel.runModal() == .OK else { return }
+        for url in panel.urls { if let d = try? Data(contentsOf: url) { attach(d) } }
+    }
+
+    /// ⌘V with an image on the clipboard attaches it; text pastes normally.
+    private func installPasteMonitor() {
+        guard pasteMonitor == nil else { return }
+        pasteMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            guard event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
+                  event.charactersIgnoringModifiers == "v",
+                  store.selection == .chat, NSApp.keyWindow?.attachedSheet == nil else { return event }
+            let pb = NSPasteboard.general
+            let imageFiles = ImageAttach.fileURLs(pb).filter { ImageAttach.imageExtensions.contains($0.pathExtension.lowercased()) }
+            if !imageFiles.isEmpty {
+                for u in imageFiles { if let d = try? Data(contentsOf: u) { attach(d) } }
+                return nil
+            }
+            if pb.string(forType: .string) == nil, let png = ImageAttach.imagePNG(pb) {
+                attach(png); return nil
+            }
+            return event
+        }
+    }
+
+    private func handleDrop(_ providers: [NSItemProvider]) {
+        for p in providers {
+            if p.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
+                _ = p.loadObject(ofClass: URL.self) { url, _ in
+                    guard let url, ImageAttach.imageExtensions.contains(url.pathExtension.lowercased()),
+                          let d = try? Data(contentsOf: url) else { return }
+                    DispatchQueue.main.async { attach(d) }
+                }
+            } else if p.hasItemConformingToTypeIdentifier(UTType.image.identifier) {
+                p.loadDataRepresentation(forTypeIdentifier: UTType.image.identifier) { d, _ in
+                    guard let d else { return }
+                    DispatchQueue.main.async { attach(d) }
+                }
+            }
+        }
     }
 }
 
@@ -275,10 +378,22 @@ struct MessageBubble: View {
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: message.role == "user" ? "person.circle.fill" : "cpu")
-                .font(.title3).foregroundStyle(message.role == "user" ? Color.accentColor : .secondary)
+                .font(.title3).foregroundStyle(message.role == "user" ? Theme.accent : .secondary)
             VStack(alignment: .leading, spacing: 4) {
                 Text(message.role == "user" ? "You" : "Model").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                Text(message.content.isEmpty ? "…" : message.content).textSelection(.enabled)
+                if !message.images.isEmpty {
+                    HStack(spacing: 6) {
+                        ForEach(Array(message.images.enumerated()), id: \.offset) { _, d in
+                            if let img = NSImage(data: d) {
+                                Image(nsImage: img).resizable().scaledToFit()
+                                    .frame(maxWidth: 180, maxHeight: 140).clipShape(RoundedRectangle(cornerRadius: 8))
+                            }
+                        }
+                    }
+                }
+                if !message.content.isEmpty || message.images.isEmpty {
+                    Text(message.content.isEmpty ? "…" : message.content).textSelection(.enabled)
+                }
             }
             Spacer(minLength: 0)
         }

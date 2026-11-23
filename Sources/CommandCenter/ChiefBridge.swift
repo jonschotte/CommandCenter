@@ -206,10 +206,17 @@ final class CommandCenterControlServer {
         return r
     }
 
+    /// Empty terminal cells come back as NUL; show them as spaces (TUIs move the cursor instead of printing spaces).
+    static func clean(_ s: String) -> String {
+        var r = s.replacingOccurrences(of: "\u{0}", with: " ")
+        while r.last == " " { r.removeLast() }
+        return r
+    }
+
     private func screenLines(_ s: Session, _ n: Int) -> [String] {
         let t = s.terminal.getTerminal()
         var out: [String] = []
-        for row in 0..<t.rows { out.append(t.getLine(row: row)?.translateToString(trimRight: true) ?? "") }
+        for row in 0..<t.rows { out.append(Self.clean(t.getLine(row: row)?.translateToString(trimRight: true) ?? "")) }
         while let last = out.last, last.trimmingCharacters(in: .whitespaces).isEmpty { out.removeLast() }
         return Array(out.suffix(n))
     }
@@ -372,6 +379,8 @@ struct ChiefSessionInfo: Identifiable, Equatable {
     let backend: String
     let model: String?
     let costUSD: Double?
+    var cols: Int? = nil
+    var rows: Int? = nil
 
     var activity: SessionActivity {
         switch status {
@@ -405,7 +414,8 @@ final class ChiefHostLink: ObservableObject {
                 ChiefSessionInfo(id: s["id"] as? String ?? "", name: s["name"] as? String ?? "", cwd: s["cwd"] as? String ?? "",
                                  status: s["status"] as? String ?? "idle", blockedReason: s["blockedReason"] as? String,
                                  backend: s["backend"] as? String ?? "claude", model: s["model"] as? String,
-                                 costUSD: (s["costUSD"] as? NSNumber)?.doubleValue)
+                                 costUSD: (s["costUSD"] as? NSNumber)?.doubleValue,
+                                 cols: (s["cols"] as? NSNumber)?.intValue, rows: (s["rows"] as? NSNumber)?.intValue)
             }
             DispatchQueue.main.async {
                 if self.connected != (r != nil) { self.connected = r != nil }
@@ -451,12 +461,12 @@ struct ChiefSessionView: View {
         if let info = link.sessions.first(where: { $0.id == id }) {
             VStack(spacing: 0) {
                 HStack(spacing: 12) {
-                    IconBadge(symbol: "person.crop.circle.badge.checkmark", color: .purple, size: 32)
+                    IconBadge(symbol: "person.crop.circle.badge.checkmark", color: Theme.accent, size: 32)
                     VStack(alignment: .leading, spacing: 2) {
                         HStack(spacing: 8) {
                             Text(info.name).font(.headline).lineLimit(1)
                             Text("Chief").font(.caption2.weight(.semibold)).foregroundStyle(.white)
-                                .padding(.horizontal, 6).padding(.vertical, 2).background(Capsule().fill(Color.purple.gradient))
+                                .padding(.horizontal, 6).padding(.vertical, 2).background(Capsule().fill(Theme.accent.gradient))
                             StatusPill(activity: info.activity)
                             if let m = info.model, !m.isEmpty {
                                 Text(m).font(.caption).padding(.horizontal, 6).padding(.vertical, 2).background(Capsule().fill(.quaternary))
@@ -481,7 +491,7 @@ struct ChiefSessionView: View {
                 .padding(.horizontal, 14).padding(.vertical, 10)
                 Rectangle().fill(info.activity == .idle || info.activity == .exited ? Color(nsColor: .separatorColor) : info.activity.color)
                     .frame(height: info.activity == .idle || info.activity == .exited ? 1 : 2)
-                ChiefTerminalPane(sessionId: id).id(id)
+                ChiefTerminalPane(sessionId: id, cols: info.cols, rows: info.rows).id(id)
                     .frame(minWidth: 200, maxWidth: .infinity, minHeight: 150, maxHeight: .infinity)
                     .background(Color(nsColor: TerminalProfile.current.background))
                     .clipped()
@@ -497,23 +507,85 @@ struct ChiefSessionView: View {
     }
 }
 
+/// Hosts a Chief session's terminal at the session's own size (normally 120×40) instead of resizing
+/// the session to fit this pane. Claude doesn't redraw what it already printed when its terminal
+/// changes size, so resizing a shared session re-wraps old replies mid-word for every viewer. Here the
+/// font shrinks until the session's columns and rows fit, and the session itself is never resized.
+final class ChiefFitView: NSView {
+    let terminal: TerminalView
+    private(set) var cols: Int?
+    private(set) var rows: Int?
+    private var profileObserver: NSObjectProtocol?
+
+    init(terminal: TerminalView) {
+        self.terminal = terminal
+        super.init(frame: NSRect(x: 0, y: 0, width: 800, height: 500))
+        wantsLayer = true
+        layer?.masksToBounds = true
+        addSubview(terminal)
+        profileObserver = NotificationCenter.default.addObserver(forName: TerminalProfile.fontChanged, object: nil, queue: .main) { [weak self] _ in
+            self?.needsLayout = true
+        }
+    }
+    required init?(coder: NSCoder) { fatalError() }
+    deinit { if let o = profileObserver { NotificationCenter.default.removeObserver(o) } }
+    override var isFlipped: Bool { true }
+
+    func setSize(cols c: Int?, rows r: Int?) {
+        guard let c, let r, c > 0, r > 0, c != cols || r != rows else { return }
+        cols = c; rows = r
+        needsLayout = true
+        layoutSubtreeIfNeeded()
+    }
+
+    private static func cell(_ f: NSFont) -> CGSize {
+        let w = f.advancement(forGlyph: f.glyph(withName: "W")).width
+        let h = ceil(CTFontGetAscent(f) + CTFontGetDescent(f) + CTFontGetLeading(f))
+        return CGSize(width: w, height: h)
+    }
+
+    override func layout() {
+        super.layout()
+        guard let cols, let rows, bounds.width > 0, bounds.height > 0 else { terminal.frame = bounds; return }
+        let base = TerminalProfile.current.sizedFont
+        // Space SwiftTerm keeps for its scroller beside the cells.
+        let scroller = max(0, terminal.getOptimalFrameSize().width - Self.cell(terminal.font).width * CGFloat(terminal.getTerminal().cols))
+        var size = base.pointSize
+        var font = base
+        var c = Self.cell(font)
+        while size > 6, c.width * CGFloat(cols) + scroller > bounds.width || c.height * CGFloat(rows) > bounds.height {
+            size -= 0.5
+            font = NSFont(descriptor: base.fontDescriptor, size: size) ?? .monospacedSystemFont(ofSize: size, weight: .regular)
+            c = Self.cell(font)
+        }
+        if terminal.font.pointSize != font.pointSize || terminal.font.fontName != font.fontName { terminal.font = font }
+        // A hair of slack so SwiftTerm's floor() lands on exactly `cols` × `rows`.
+        terminal.frame = NSRect(x: 0, y: 0, width: c.width * CGFloat(cols) + scroller + 0.5, height: c.height * CGFloat(rows) + 0.5)
+    }
+}
+
 struct ChiefTerminalPane: NSViewRepresentable {
     let sessionId: String
+    var cols: Int?
+    var rows: Int?
     func makeCoordinator() -> Coordinator { Coordinator(sessionId: sessionId) }
 
-    func makeNSView(context: Context) -> TerminalView {
+    func makeNSView(context: Context) -> ChiefFitView {
         let tv = TerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 500))
         TerminalProfile.current.apply(to: tv)
         tv.terminalDelegate = context.coordinator
-        context.coordinator.attach(tv)
-        return tv
+        let fit = ChiefFitView(terminal: tv)
+        fit.setSize(cols: cols, rows: rows)
+        context.coordinator.attach(fit)
+        return fit
     }
-    func updateNSView(_ nsView: TerminalView, context: Context) {}
-    static func dismantleNSView(_ nsView: TerminalView, coordinator: Coordinator) { coordinator.detach() }
+    func updateNSView(_ nsView: ChiefFitView, context: Context) { nsView.setSize(cols: cols, rows: rows) }
+    static func dismantleNSView(_ nsView: ChiefFitView, coordinator: Coordinator) { coordinator.detach() }
 
     final class Coordinator: NSObject, TerminalViewDelegate {
         let sessionId: String
         weak var view: TerminalView?
+        weak var fit: ChiefFitView?
         private let lock = NSLock()
         private var client: CHClient?
         private var detached = false
@@ -522,10 +594,10 @@ struct ChiefTerminalPane: NSViewRepresentable {
 
         init(sessionId: String) { self.sessionId = sessionId }
 
-        func attach(_ tv: TerminalView) {
-            view = tv
-            let term = tv.getTerminal()
-            let cols = term.cols, rows = term.rows, sid = sessionId
+        func attach(_ fit: ChiefFitView) {
+            self.fit = fit
+            view = fit.terminal
+            let sid = sessionId
             let t = Thread { [weak self] in
                 guard let self else { return }
                 do {
@@ -534,13 +606,20 @@ struct ChiefTerminalPane: NSViewRepresentable {
                     if self.detached { self.lock.unlock(); return }
                     self.client = c
                     self.lock.unlock()
-                    _ = try c.call("session.attach", ["target": sid, "cols": cols, "rows": rows], timeout: nil) { [weak self] ev in
+                    // No cols/rows: attaching must not resize the session (see ChiefFitView).
+                    _ = try c.call("session.attach", ["target": sid], timeout: nil) { [weak self] ev in
                         switch ev["type"] as? String {
                         case "snapshot":
                             let lines = ev["lines"] as? [String] ?? []
                             let cx = ev["cursorX"] as? Int ?? 0, cy = ev["cursorY"] as? Int ?? 0
+                            let summary = ev["session"] as? CCJSON
+                            let cols = (summary?["cols"] as? NSNumber)?.intValue, rows = (summary?["rows"] as? NSNumber)?.intValue
                             let text = "\u{1B}[2J\u{1B}[H" + lines.joined(separator: "\r\n") + "\u{1B}[\(cy + 1);\(cx + 1)H"
-                            DispatchQueue.main.async { self?.view?.feed(text: text) }
+                            DispatchQueue.main.async {
+                                // Match the session's size before drawing, so its lines land unwrapped.
+                                self?.fit?.setSize(cols: cols, rows: rows)
+                                self?.view?.feed(text: text)
+                            }
                         case "output":
                             if let b = ev["data"] as? String, let d = Data(base64Encoded: b) {
                                 let bytes = [UInt8](d)
@@ -577,9 +656,8 @@ struct ChiefTerminalPane: NSViewRepresentable {
         func send(source: TerminalView, data: ArraySlice<UInt8>) {
             sendToHost("session.input", ["target": sessionId, "data": Data(data).base64EncodedString()])
         }
-        func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {
-            sendToHost("session.resize", ["target": sessionId, "cols": newCols, "rows": newRows])
-        }
+        // The session keeps its own size; this pane fits itself to it instead (ChiefFitView).
+        func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {}
         func setTerminalTitle(source: TerminalView, title: String) {}
         func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
         func scrolled(source: TerminalView, position: Double) {}

@@ -19,7 +19,10 @@ struct CommandCenterApp: App {
                 .environmentObject(models)
                 .environmentObject(events)
                 .frame(minWidth: 1000, minHeight: 640)
+                .tint(Theme.accent)
+                .preferredColorScheme(.dark)
                 .onAppear {
+                    Theme.styleWindows()
                     events.sessions = sessions
                     events.scanner = scanner
                     events.start()
@@ -38,6 +41,10 @@ struct CommandCenterApp: App {
                     .keyboardShortcut("t", modifiers: .command)
                 Button("New Terminal") { sessions.newTerminal() }
                     .keyboardShortcut("t", modifiers: [.command, .shift])
+                Button("New Claude") { sessions.newClaude(skipPermissions: false) }
+                    .keyboardShortcut("c", modifiers: [.command, .option])
+                Button("New Claude (Skip Permissions)") { sessions.newClaude(skipPermissions: true) }
+                    .keyboardShortcut("c", modifiers: [.command, .option, .shift])
             }
             CommandMenu("Terminal") {
                 Button("Find…") { TerminalCommands.find(.showFindInterface) }.keyboardShortcut("f")
@@ -54,6 +61,8 @@ struct CommandCenterApp: App {
         Settings {
             SettingsView()
                 .environmentObject(events)
+                .tint(Theme.accent)
+                .preferredColorScheme(.dark)
         }
     }
 }

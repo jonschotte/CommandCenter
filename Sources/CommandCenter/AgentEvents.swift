@@ -195,6 +195,10 @@ final class AgentEvents: NSObject, ObservableObject, UNUserNotificationCenterDel
            let s = sessions?.session(uuid) {
             let previous = s.claudeState
             s.applyHook(state, message: message)
+            if name == "UserPromptSubmit", let prompt = e["prompt"] as? String {
+                s.adoptNameFromPrompt(prompt)
+                sessions?.objectWillChange.send()
+            }
             if state != previous { maybeNotify(state: state, title: s.name, message: message, sessionID: uuid, pid: nil) }
             if state == .needsPermission || state == .done, sessions?.selection != .session(uuid) || !NSApp.isActive {
                 if name != "SessionStart" { s.needsAttention = true; sessions?.updateBadge() }

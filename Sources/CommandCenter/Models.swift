@@ -26,6 +26,17 @@ struct ChatMessage: Identifiable {
     let id = UUID()
     var role: String
     var content: String
+    var images: [Data] = []   // JPEG, already downscaled for the model
+
+    /// OpenAI chat format: plain string, or text + image_url parts when images are attached.
+    var apiContent: Any {
+        guard !images.isEmpty else { return content }
+        var parts: [[String: Any]] = images.map {
+            ["type": "image_url", "image_url": ["url": "data:image/jpeg;base64," + $0.base64EncodedString()]]
+        }
+        if !content.isEmpty { parts.append(["type": "text", "text": content]) }
+        return parts
+    }
 }
 
 enum ServerState: Equatable {
@@ -355,15 +366,15 @@ final class ModelManager: ObservableObject {
 
     // MARK: Chat
 
-    func send(_ text: String) {
-        guard let ep = chatEndpoint, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        messages.append(ChatMessage(role: "user", content: text))
+    func send(_ text: String, images: [Data] = []) {
+        guard let ep = chatEndpoint, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !images.isEmpty else { return }
+        messages.append(ChatMessage(role: "user", content: text, images: images))
         messages.append(ChatMessage(role: "assistant", content: ""))
         isGenerating = true
         chatError = nil
-        var history: [[String: String]] = []
+        var history: [[String: Any]] = []
         if !systemPrompt.isEmpty { history.append(["role": "system", "content": systemPrompt]) }
-        history += messages.dropLast().map { ["role": $0.role, "content": $0.content] }
+        history += messages.dropLast().map { ["role": $0.role, "content": $0.apiContent] }
         let body: [String: Any] = ["model": chatModel, "messages": history, "stream": true, "max_tokens": 4096]
         let base = ep.baseURL
 
@@ -405,6 +416,13 @@ final class ModelManager: ObservableObject {
     func stopGenerating() {
         chatTask?.cancel()
         isGenerating = false
+    }
+
+    /// The chat as plain text, for summarizing.
+    var chatTranscript: String {
+        messages.filter { !$0.content.isEmpty || !$0.images.isEmpty }.map {
+            ($0.role == "user" ? "USER: " : "ASSISTANT: ") + $0.content + ($0.images.isEmpty ? "" : " [\($0.images.count) image(s) attached]")
+        }.joined(separator: "\n\n")
     }
 
     func clearChat() {

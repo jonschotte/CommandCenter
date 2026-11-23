@@ -227,11 +227,13 @@ final class ProcessScanner: ObservableObject {
         guard let first = parts.first else { return nil }
         var base = (first as NSString).lastPathComponent
         if base.hasPrefix("-") { base.removeFirst() }
+        // Newer Claude Code renames its process to "Claude", so match names case-insensitively.
+        base = base.lowercased()
         if let cat = agentNames[base] { return (base, cat) }
         if wrappers.contains(base) || base.hasPrefix("python3.") {
             for arg in parts.dropFirst().prefix(3) where !arg.hasPrefix("-") || arg == "-m" {
                 if arg == "-m" { continue }
-                var b = (arg as NSString).lastPathComponent
+                var b = (arg as NSString).lastPathComponent.lowercased()
                 for ext in [".js", ".mjs", ".cjs", ".py"] where b.hasSuffix(ext) { b = String(b.dropLast(ext.count)) }
                 if b == "cli" || b == "index" {
                     // e.g. node …/@anthropic-ai/claude-code/cli.js

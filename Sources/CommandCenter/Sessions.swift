@@ -63,6 +63,40 @@ final class SessionTerminalView: LocalProcessTerminalView {
         super.dataReceived(slice: slice)
         onData?()
     }
+
+    /// ⌘V with an image (or copied files) on the clipboard types the file path(s), the way dropping a file
+    /// into Terminal does. Claude Code picks up image paths as attachments. Plain text pastes as usual.
+    override func paste(_ sender: Any) {
+        let pb = NSPasteboard.general
+        let files = ImageAttach.fileURLs(pb)
+        if pb.string(forType: .string) == nil || !files.isEmpty {
+            let paths = ImageAttach.imagePaths(pb, includeAllFiles: true)
+            if !paths.isEmpty { typePaths(paths); return }
+        }
+        super.paste(sender)
+    }
+
+    private func typePaths(_ paths: [String]) {
+        // Sent as a bracketed paste when the program asks for it, like a real paste/drop.
+        var text = paths.map(ImageAttach.shellEscaped).joined(separator: " ") + " "
+        if getTerminal().bracketedPasteMode { text = "\u{1B}[200~" + text + "\u{1B}[201~" }
+        send(data: Array(text.utf8)[...])
+        window?.makeFirstResponder(self)
+    }
+
+    private var dropRegistered = false
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if !dropRegistered { registerForDraggedTypes([.fileURL, .png, .tiff]); dropRegistered = true }
+    }
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation { .copy }
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation { .copy }
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        let paths = ImageAttach.imagePaths(sender.draggingPasteboard, includeAllFiles: true)
+        guard !paths.isEmpty else { return false }
+        typePaths(paths)
+        return true
+    }
 }
 
 struct LaunchSpec: Codable {
@@ -143,7 +177,7 @@ enum SessionVault {
 
 final class Session: ObservableObject, Identifiable {
     let id: UUID
-    let spec: LaunchSpec
+    private(set) var spec: LaunchSpec
     let started: Date
     let terminal: SessionTerminalView
     let persistent: Bool
@@ -155,7 +189,7 @@ final class Session: ObservableObject, Identifiable {
         var out: [String] = []
         var row = t.rows - 1
         while row >= 0 && out.count < n {
-            if let line = t.getLine(row: row)?.translateToString(trimRight: true),
+            if let line = t.getLine(row: row)?.translateToString(trimRight: true).replacingOccurrences(of: "\u{0}", with: " "),
                !line.trimmingCharacters(in: .whitespaces).isEmpty { out.insert(line, at: 0) }
             row -= 1
         }
@@ -271,6 +305,26 @@ final class Session: ObservableObject, Identifiable {
         claudeState = state == .ended ? nil : state
         claudeMessage = message
     }
+
+    /// A session still named after its folder (the default) takes its name from the first real prompt,
+    /// so two terminals opened in the same folder can be told apart. A name someone chose is kept.
+    func adoptNameFromPrompt(_ prompt: String) {
+        guard spec.name == (spec.directory as NSString).lastPathComponent,
+              let title = Self.title(fromPrompt: prompt) else { return }
+        objectWillChange.send()
+        spec.name = title
+        if persistent { SessionVault.save(SessionRecord(id: id, spec: spec, started: started)) }
+    }
+
+    static func title(fromPrompt prompt: String) -> String? {
+        let line = prompt.split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .first { !$0.isEmpty } ?? ""
+        // Slash commands and shell escapes say little about the task; wait for a real prompt.
+        guard !line.isEmpty, !line.hasPrefix("/"), !line.hasPrefix("!") else { return nil }
+        let words = line.split(separator: " ").joined(separator: " ")
+        return words.count <= 40 ? words : String(words.prefix(39)).trimmingCharacters(in: .whitespaces) + "…"
+    }
 }
 
 final class SessionStore: NSObject, ObservableObject, LocalProcessTerminalViewDelegate {
@@ -349,6 +403,18 @@ final class SessionStore: NSObject, ObservableObject, LocalProcessTerminalViewDe
         let directory = d ?? recentDirectories.first ?? NSHomeDirectory()
         return launch(LaunchSpec(name: (directory as NSString).lastPathComponent, directory: directory,
                                  kind: .shell, model: "", modelLabel: "", command: ""))
+    }
+
+    /// Starts Claude Code right away, in the selected session's folder or the most recent one.
+    @discardableResult
+    func newClaude(skipPermissions: Bool, in dir: String? = nil) -> Session {
+        var d = dir
+        if d == nil, case .session(let id) = selection { d = session(id)?.currentDirectory }
+        let directory = d ?? recentDirectories.first ?? NSHomeDirectory()
+        let command = skipPermissions ? "claude --dangerously-skip-permissions" : "claude"
+        return launch(LaunchSpec(name: (directory as NSString).lastPathComponent, directory: directory,
+                                 kind: .claude, model: "", modelLabel: skipPermissions ? "Claude · no prompts" : "Claude",
+                                 command: command))
     }
 
     /// Reopens an agent that's running in another terminal as a full Command Center session.

@@ -14,6 +14,7 @@ struct ContentView: View {
     @ObservedObject var groups = GroupStore.shared
     @ObservedObject var chief = ChiefHostLink.shared
     @State private var moveAgent: DetectedAgent?
+    @State private var pendingChiefRemove: ChiefSessionInfo?
 
     @ViewBuilder private func sessionRow(_ s: Session) -> some View {
         SessionRow(session: s).tag(SidebarItem.session(s.id))
@@ -47,6 +48,7 @@ struct ContentView: View {
     var body: some View {
         NavigationSplitView {
             VStack(spacing: 0) {
+            BrandHeader()
             List(selection: $store.selection) {
                 Section {
                     Label("Dashboard", systemImage: "square.grid.2x2").tag(SidebarItem.dashboard)
@@ -55,6 +57,16 @@ struct ContentView: View {
                 let external = scanner.agents.filter { !$0.inApp && $0.category == .agent && $0.host != "ChiefHost" }
                 Section {
                     ForEach(store.sessions.filter { groups.group(for: GroupKey.of($0)) == nil }) { s in sessionRow(s) }
+                    HStack(spacing: 12) {
+                        Button { store.newClaude(skipPermissions: false) } label: { Label("Claude", systemImage: "sparkles") }
+                            .help("Start Claude Code now in the current folder (⌥⌘C)")
+                        Button { store.newClaude(skipPermissions: true) } label: { Label("No prompts", systemImage: "bolt.fill") }
+                            .help("Start Claude Code with --dangerously-skip-permissions: it runs commands and edits files without asking (⌥⇧⌘C)")
+                    }
+                    .labelStyle(.titleAndIcon)
+                    .font(.caption.weight(.medium))
+                    .buttonStyle(.plain)
+                    .foregroundStyle(Theme.accent)
                     HStack(spacing: 14) {
                         Button { store.showNewSession = true } label: { Label("Session", systemImage: "plus.circle.fill") }
                             .help("New session with Claude, a local model, or a command (⌘T)")
@@ -66,7 +78,7 @@ struct ContentView: View {
                     .labelStyle(.titleAndIcon)
                     .font(.caption.weight(.medium))
                     .buttonStyle(.plain)
-                    .foregroundStyle(Color.accentColor)
+                    .foregroundStyle(Theme.accent)
                 } header: {
                     Text("Sessions")
                         .dropDestination(for: String.self) { keys, _ in
@@ -101,6 +113,8 @@ struct ContentView: View {
                                     Button("Restart (resume)") { chief.perform("session.restart", id: c.id) }
                                     Button("Stop") { chief.perform("session.stop", id: c.id) }
                                     Button("Reveal in Finder") { reveal(c.cwd) }
+                                    Divider()
+                                    Button("Remove…", role: .destructive) { pendingChiefRemove = c }
                                 }
                         }
                         if chief.sessions.isEmpty {
@@ -137,16 +151,21 @@ struct ContentView: View {
                 }
             }
             .listStyle(.sidebar)
+            .scrollContentBackground(.hidden)
             Divider()
             SidebarStats()
                 .padding(.horizontal, 14).padding(.vertical, 10)
             }
+            .background(Theme.gunmetalDeep)
             .navigationSplitViewColumnWidth(min: 230, ideal: 260)
         } detail: {
             detail
                 .frame(minWidth: 500, maxWidth: .infinity, maxHeight: .infinity)
+                .background(Theme.gunmetal)
         }
         .navigationSplitViewStyle(.balanced)
+        .toolbarBackground(Theme.gunmetal, for: .windowToolbar)
+        .toolbarBackground(.visible, for: .windowToolbar)
         .confirmationDialog("Close “\(store.pendingClose?.name ?? "")”?",
                             isPresented: Binding(get: { store.pendingClose != nil }, set: { if !$0 { store.pendingClose = nil } })) {
             Button("Stop & Close", role: .destructive) {
@@ -155,6 +174,18 @@ struct ContentView: View {
             }
         } message: {
             Text("This session is still running. Closing it stops everything running in it.")
+        }
+        .confirmationDialog("Remove “\(pendingChiefRemove?.name ?? "")”?",
+                            isPresented: Binding(get: { pendingChiefRemove != nil }, set: { if !$0 { pendingChiefRemove = nil } })) {
+            Button("Remove", role: .destructive) {
+                if let c = pendingChiefRemove {
+                    if store.selection == .chief(c.id) { store.selection = .dashboard }
+                    chief.perform("session.remove", id: c.id)
+                }
+                pendingChiefRemove = nil
+            }
+        } message: {
+            Text("Stops this session and removes it from ChiefHost, including its settings and log. The Claude conversation transcript is kept. If this is a Master Chief chat, the chat stays in Master Chief's list with no session behind it.")
         }
         .confirmationDialog(externalCloseTitle,
                             isPresented: Binding(get: { store.pendingExternalClose != nil }, set: { if !$0 { store.pendingExternalClose = nil } })) {
@@ -176,6 +207,18 @@ struct ContentView: View {
         .moveHereDialog(agent: $moveAgent)
         .groupPrompts()
         .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Menu {
+                    Button("Claude") { store.newClaude(skipPermissions: false) }
+                    Button("Claude — skip permissions") { store.newClaude(skipPermissions: true) }
+                    Divider()
+                    Button("Claude in Folder…") { if let d = pickFolder() { store.newClaude(skipPermissions: false, in: d) } }
+                    Button("Claude in Folder, skip permissions…") { if let d = pickFolder() { store.newClaude(skipPermissions: true, in: d) } }
+                } label: { Label("Claude", systemImage: "sparkles") } primaryAction: {
+                    store.newClaude(skipPermissions: false)
+                }
+                .help("Start Claude Code (click), or pick permissions/folder (arrow)")
+            }
             ToolbarItem(placement: .primaryAction) {
                 Button { store.newTerminal() } label: { Label("New Terminal", systemImage: "terminal") }
                     .help("New terminal (⇧⌘T)")
@@ -312,7 +355,7 @@ struct SidebarStats: View {
 
 struct MiniMeter: View {
     let label: String
-    var color: Color = .accentColor
+    var color: Color = Theme.accent
     let value: Double
     let text: String
     var body: some View {
@@ -336,7 +379,7 @@ struct MiniMeter: View {
     }
 }
 
-func meterColor(_ v: Double) -> Color { v > 0.9 ? .red : v > 0.7 ? .orange : .accentColor }
+func meterColor(_ v: Double) -> Color { v > 0.9 ? .red : v > 0.7 ? .orange : Theme.accent }
 
 func reveal(_ path: String) {
     NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: path)
@@ -379,6 +422,8 @@ struct SessionDetailView: View {
                     StatText(label: "Up", value: formatDuration(Date().timeIntervalSince(session.started)))
                 }
                 Divider().frame(height: 28)
+                SummarizeButton(label: session.name, claudePid: { claudePid(in: session) },
+                                terminalText: { Transcript.terminalText(session.terminal) })
                 Button { reveal(session.currentDirectory) } label: { Image(systemName: "folder") }.help("Reveal folder in Finder")
                 Button { store.restart(session) } label: { Image(systemName: "arrow.clockwise") }.help("Restart session")
                 if session.isRunning {
@@ -609,4 +654,20 @@ struct NewSessionSheet: View {
                                 modelLabel: modelLabel(), command: command))
         dismiss()
     }
+}
+
+/// The Claude process running inside an in-app session, if any.
+func claudePid(in session: Session) -> pid_t? {
+    guard let scanner = ProcessScanner.shared else { return nil }
+    var tree = Set<pid_t>()
+    for r in [session.rootPid, session.pid] where r > 0 { tree.insert(r); tree.formUnion(scanner.descendants(of: r)) }
+    return scanner.agents.first { $0.name == "claude" && tree.contains($0.pid) }?.pid
+}
+
+func pickFolder() -> String? {
+    let panel = NSOpenPanel()
+    panel.canChooseDirectories = true
+    panel.canChooseFiles = false
+    panel.prompt = "Start Here"
+    return panel.runModal() == .OK ? panel.url?.path : nil
 }

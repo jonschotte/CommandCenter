@@ -51,7 +51,7 @@ struct DashboardView: View {
                 let ungroupedS = store.sessions.filter { groups.group(for: GroupKey.of($0)) == nil }
                 let ungroupedX = external.filter { groups.group(for: GroupKey.of($0)) == nil }
                 if !ungroupedS.isEmpty {
-                    tileSection(title: groups.groups.isEmpty ? "Sessions" : "Ungrouped", color: .accentColor, group: nil, sessions: ungroupedS, agents: [])
+                    tileSection(title: groups.groups.isEmpty ? "Sessions" : "Ungrouped", color: Theme.accent, group: nil, sessions: ungroupedS, agents: [])
                 }
                 if !ungroupedX.isEmpty {
                     tileSection(title: "Running in other terminals", color: .secondary, group: nil, sessions: [], agents: ungroupedX)
@@ -81,7 +81,7 @@ struct DashboardView: View {
         return VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .firstTextBaseline) {
                 Text("Command Center").font(.largeTitle.weight(.bold))
-                    .foregroundStyle(LinearGradient(colors: [.indigo, .purple, .pink], startPoint: .leading, endPoint: .trailing))
+                    .foregroundStyle(LinearGradient(colors: [Theme.accent, Theme.memory, Theme.steel], startPoint: .leading, endPoint: .trailing))
                 Spacer()
                 Button { store.newTerminal() } label: { Label("New Terminal", systemImage: "terminal") }
                 Button { store.showNewSession = true } label: { Label("New Session", systemImage: "plus") }
@@ -349,7 +349,7 @@ struct TerminalPreview: View {
         .font(.system(size: 10.5, design: .monospaced))
         .frame(maxWidth: .infinity, minHeight: 62, alignment: .topLeading)
         .padding(8)
-        .background(RoundedRectangle(cornerRadius: 8).fill(Color(red: 0.08, green: 0.08, blue: 0.11)))
+        .background(RoundedRectangle(cornerRadius: 8).fill(Theme.gunmetalDeep))
         .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.white.opacity(0.06)))
     }
 }
@@ -472,7 +472,7 @@ struct EmptyHint: View {
 
 extension View {
     func card() -> some View {
-        background(RoundedRectangle(cornerRadius: 10).fill(Color(nsColor: .controlBackgroundColor)))
+        background(RoundedRectangle(cornerRadius: 10).fill(Theme.surface))
             .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(.separator.opacity(0.6)))
     }
 }
@@ -528,8 +528,8 @@ struct SystemView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 HStack(alignment: .top, spacing: 12) {
-                    BigChart(title: "CPU", value: "\(Int(system.cpuTotal * 100))%", history: system.cpuHistory, color: .blue)
-                    BigChart(title: "Memory", value: "\(Int(system.memFraction * 100))%", history: system.memHistory, color: .purple)
+                    BigChart(title: "CPU", value: "\(Int(system.cpuTotal * 100))%", history: system.cpuHistory, color: Theme.cpu)
+                    BigChart(title: "Memory", value: "\(Int(system.memFraction * 100))%", history: system.memHistory, color: Theme.memory)
                     BigChart(title: "GPU", value: "\(Int(system.gpuUtil * 100))%", history: system.gpuHistory, color: .orange)
                 }
 
@@ -681,7 +681,7 @@ struct ClickableRow: ViewModifier {
 
     func body(content: Content) -> some View {
         content
-            .background(hovering && enabled ? Color.accentColor.opacity(0.08) : Color.clear)
+            .background(hovering && enabled ? Theme.accent.opacity(0.08) : Color.clear)
             .contentShape(Rectangle())
             .onHover { h in
                 hovering = h

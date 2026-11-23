@@ -92,6 +92,9 @@ struct ExternalSessionView: View {
                 Button { TerminalBridge.focus(host, tty: agent.tty) } label: { Image(systemName: "macwindow") }
                     .help("Show this tab in \(agent.host)")
             }
+            SummarizeButton(label: (agent.cwd as NSString).lastPathComponent,
+                            claudePid: { agent.name == "claude" ? agent.pid : nil },
+                            terminalText: { text })
             Button { reveal(agent.cwd) } label: { Image(systemName: "folder") }.help("Reveal folder in Finder")
             Button { store.requestExternalClose(agent) } label: { Image(systemName: "xmark") }
                 .help(host != nil ? "Stop and close this \(agent.host) tab" : "Stop this agent")

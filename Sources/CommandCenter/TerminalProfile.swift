@@ -74,7 +74,11 @@ struct TerminalProfile {
     static func changeSize(by delta: CGFloat?) {
         sizeDelta = delta.map { max(-4, min(24, sizeDelta + $0)) } ?? 0
         for tv in views.allObjects { tv.font = current.sizedFont }
+        NotificationCenter.default.post(name: fontChanged, object: nil)
     }
+
+    /// Posted after the text size changes, for views that size their own font (ChiefFitView).
+    static let fontChanged = Notification.Name("TerminalProfile.fontChanged")
 
     func apply(to tv: TerminalView) {
         Self.views.add(tv)
